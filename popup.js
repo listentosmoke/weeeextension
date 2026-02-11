@@ -1,6 +1,7 @@
 const apiKeyInput = document.getElementById("apiKey");
 const taskInput = document.getElementById("task");
 const maxStepsInput = document.getElementById("maxSteps");
+const useDebugModeInput = document.getElementById("useDebugMode");
 const startButton = document.getElementById("start");
 const stopButton = document.getElementById("stop");
 const statusEl = document.getElementById("status");
@@ -11,8 +12,9 @@ init().catch((error) => {
 });
 
 async function init() {
-  const data = await chrome.storage.local.get(["apiKey", "automationStatus", "automationLogs"]);
+  const data = await chrome.storage.local.get(["apiKey", "useDebugMode", "automationStatus", "automationLogs"]);
   apiKeyInput.value = data.apiKey || "";
+  useDebugModeInput.checked = data.useDebugMode !== false;
   renderStatus(data.automationStatus || {});
   renderLogs(data.automationLogs || []);
 
@@ -36,17 +38,18 @@ async function onStart() {
   const apiKey = apiKeyInput.value.trim();
   const task = taskInput.value.trim();
   const maxSteps = Number(maxStepsInput.value);
+  const useDebugMode = useDebugModeInput.checked;
 
   if (!apiKey || !task) {
     alert("API key and task are required.");
     return;
   }
 
-  await chrome.storage.local.set({ apiKey });
+  await chrome.storage.local.set({ apiKey, useDebugMode });
 
   const response = await chrome.runtime.sendMessage({
     type: "START_AUTOMATION",
-    payload: { apiKey, task, maxSteps },
+    payload: { apiKey, task, maxSteps, useDebugMode },
   });
 
   if (!response?.ok) {

@@ -103,3 +103,15 @@ button.danger {
 .log-success { color: #86efac; }
 .log-warn { color: #fcd34d; }
 .log-error { color: #fca5a5; }
+
+.toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.toggle input {
+  width: 14px;
+  height: 14px;
+}

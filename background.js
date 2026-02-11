@@ -3,7 +3,6 @@ const MODEL_CANDIDATES = [
   "gemini-2.0-flash-lite",
   "gemini-1.5-flash",
 ];
-const MODEL_NAME = "gemini-1.5-flash";
 const DEFAULT_MAX_STEPS = 120;
 const MAX_ACTIONS_PER_STEP = 8;
 const LOG_LIMIT = 1000;
@@ -15,9 +14,11 @@ const runState = {
   startedAt: null,
   step: 0,
   task: "",
+  useDebugMode: true,
+  debuggerAttached: false,
 };
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message || !message.type) {
     return;
   }
@@ -31,7 +32,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === "STOP_AUTOMATION") {
     runState.stopRequested = true;
-    log("warn", "Stop requested by user.");
+    void log("warn", "Stop requested by user.");
     sendResponse({ ok: true });
   }
 });
@@ -41,7 +42,7 @@ async function startAutomation(payload) {
     throw new Error("Automation is already running.");
   }
 
-  const { apiKey, task, maxSteps } = payload ?? {};
+  const { apiKey, task, maxSteps, useDebugMode = true } = payload ?? {};
   if (!apiKey?.trim()) {
     throw new Error("Gemini API key is required.");
   }
@@ -60,6 +61,7 @@ async function startAutomation(payload) {
   runState.startedAt = Date.now();
   runState.step = 0;
   runState.task = task.trim();
+  runState.useDebugMode = Boolean(useDebugMode);
 
   await chrome.storage.local.set({
     automationStatus: {
@@ -68,11 +70,26 @@ async function startAutomation(payload) {
       task: runState.task,
       startedAt: runState.startedAt,
       tabId: runState.tabId,
+      debugMode: runState.useDebugMode,
     },
     automationLogs: [],
   });
 
-  log("info", `Starting task: ${runState.task}`);
+  await log("info", `Starting task: ${runState.task}`);
+
+  if (runState.useDebugMode) {
+    try {
+      await ensureDebuggerAttached(runState.tabId);
+      await setStatus({ debugMode: true, debugAttached: true });
+      await log("success", "Chrome debugger attached (Input domain enabled).");
+    } catch (error) {
+      runState.useDebugMode = false;
+      await setStatus({ debugMode: false, debugAttached: false });
+      await log("warn", `Failed to attach debugger, falling back to content-script mode: ${error.message}`);
+    }
+  } else {
+    await setStatus({ debugMode: false, debugAttached: false });
+  }
 
   const boundedSteps = Math.max(1, Math.min(Number(maxSteps) || DEFAULT_MAX_STEPS, 500));
   let done = false;
@@ -80,13 +97,13 @@ async function startAutomation(payload) {
   try {
     for (let step = 1; step <= boundedSteps; step += 1) {
       if (runState.stopRequested) {
-        log("warn", `Stopped at step ${step} by user request.`);
+        await log("warn", `Stopped at step ${step} by user request.`);
         break;
       }
 
       runState.step = step;
       await setStatus({ step });
-      log("info", `Step ${step}: collecting page state.`);
+      await log("info", `Step ${step}: collecting page state.`);
 
       const pageState = await collectPageState(runState.tabId);
       const modelOutput = await requestNextActions({
@@ -99,30 +116,30 @@ async function startAutomation(payload) {
 
       if (modelOutput.done) {
         done = true;
-        log("success", `Model marked task done: ${modelOutput.reason || "No reason provided."}`);
+        await log("success", `Model marked task done: ${modelOutput.reason || "No reason provided."}`);
         break;
       }
 
       if (!Array.isArray(modelOutput.actions) || modelOutput.actions.length === 0) {
-        log("warn", "Model returned no actions; stopping.");
+        await log("warn", "Model returned no actions; stopping.");
         break;
       }
 
       const actions = modelOutput.actions.slice(0, MAX_ACTIONS_PER_STEP);
-      log("info", `Executing ${actions.length} action(s).`);
+      await log("info", `Executing ${actions.length} action(s).`);
 
       for (const [index, action] of actions.entries()) {
         if (runState.stopRequested) {
-          log("warn", "Stop requested before executing remaining actions.");
+          await log("warn", "Stop requested before executing remaining actions.");
           break;
         }
 
         const result = await executeAction(runState.tabId, action);
         const label = `${step}.${index + 1} ${action.type}`;
         if (result.ok) {
-          log("success", `${label}: ${result.message}`);
+          await log("success", `${label}: ${result.message}`);
         } else {
-          log("error", `${label}: ${result.error}`);
+          await log("error", `${label}: ${result.error}`);
         }
 
         if (action.type === "wait" && typeof action.ms === "number") {
@@ -138,14 +155,31 @@ async function startAutomation(payload) {
       elapsedMs,
       done,
       stopRequested: runState.stopRequested,
+      error: null,
+      debugAttached: runState.debuggerAttached,
     });
 
     if (!runState.stopRequested) {
-      log("info", `Run complete in ${(elapsedMs / 1000).toFixed(1)}s.`);
+      await log("info", `Run complete in ${(elapsedMs / 1000).toFixed(1)}s.`);
     }
+  } catch (error) {
+    const elapsedMs = Date.now() - runState.startedAt;
+    await setStatus({
+      running: false,
+      finishedAt: Date.now(),
+      elapsedMs,
+      done: false,
+      stopRequested: runState.stopRequested,
+      error: error.message,
+      debugAttached: runState.debuggerAttached,
+    });
+    await log("error", `Automation failed: ${error.message}`);
+    throw error;
   } finally {
+    await detachDebuggerIfNeeded(runState.tabId);
     runState.running = false;
     runState.stopRequested = false;
+    runState.debuggerAttached = false;
   }
 }
 
@@ -169,7 +203,6 @@ async function collectPageState(tabId) {
 }
 
 async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const schema = {
     type: "object",
     properties: {
@@ -209,6 +242,7 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
       url: pageState.url,
       title: pageState.title,
       viewport: pageState.viewport,
+      executionMode: runState.useDebugMode ? "debugger-input" : "content-script-events",
     },
     instructions: "Plan the next actions based on the screenshot and extracted text. Continue incrementally until task completion.",
     pageText: pageState.pageText,
@@ -241,18 +275,6 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
   };
 
   const data = await requestWithModelFallback(apiKey, body);
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Gemini request failed (${response.status}): ${text.slice(0, 300)}`);
-  }
-
-  const data = await response.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     throw new Error("Gemini response missing text JSON payload.");
@@ -276,10 +298,13 @@ async function requestWithModelFallback(apiKey, body) {
   let lastError = null;
 
   for (const model of MODEL_CANDIDATES) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
       body: JSON.stringify(body),
     });
 
@@ -290,7 +315,7 @@ async function requestWithModelFallback(apiKey, body) {
 
     const rawError = await response.text();
     if (response.status === 404 || rawError.includes("is not found for API version")) {
-      log("warn", `Model ${model} unavailable for generateContent; trying next model.`);
+      await log("warn", `Model ${model} unavailable for generateContent; trying next model.`);
       lastError = `Model ${model} not available: ${rawError.slice(0, 240)}`;
       continue;
     }
@@ -304,11 +329,196 @@ async function requestWithModelFallback(apiKey, body) {
 }
 
 async function executeAction(tabId, action) {
+  if (runState.useDebugMode) {
+    const debugResult = await executeActionWithDebugger(tabId, action);
+    if (debugResult.ok || !debugResult.fallback) {
+      return debugResult;
+    }
+    await log("warn", `Debugger fallback for ${action.type}: ${debugResult.error}`);
+  }
+
   const result = await sendToContent(tabId, { type: "EXECUTE_ACTION", action });
   if (!result) {
     return { ok: false, error: "No response from content script." };
   }
   return result;
+}
+
+async function executeActionWithDebugger(tabId, action) {
+  try {
+    await ensureDebuggerAttached(tabId);
+
+    switch (action?.type) {
+      case "click":
+      case "doubleClick":
+      case "rightClick":
+        return await performDebugPointer(tabId, action);
+      case "scroll":
+        return await performDebugScroll(tabId, action);
+      case "keypress":
+        return await performDebugKeypress(tabId, action);
+      case "type":
+        return await performDebugType(tabId, action);
+      case "drag":
+        return await performDebugDrag(tabId, action);
+      case "wait":
+        return { ok: true, message: `Wait ${action.ms || 0}ms` };
+      default:
+        return { ok: false, fallback: false, error: `Unsupported action type: ${action?.type}` };
+    }
+  } catch (error) {
+    return { ok: false, fallback: true, error: error.message };
+  }
+}
+
+async function ensureDebuggerAttached(tabId) {
+  if (runState.debuggerAttached) {
+    return;
+  }
+
+  const target = { tabId };
+  await chrome.debugger.attach(target, "1.3");
+  await chrome.debugger.sendCommand(target, "Page.enable");
+  await chrome.debugger.sendCommand(target, "Input.setIgnoreInputEvents", { ignore: false });
+  runState.debuggerAttached = true;
+}
+
+async function detachDebuggerIfNeeded(tabId) {
+  if (!runState.debuggerAttached || !tabId) {
+    return;
+  }
+
+  try {
+    await chrome.debugger.detach({ tabId });
+  } catch {
+    // ignored
+  }
+}
+
+async function performDebugPointer(tabId, action) {
+  const resolved = await sendToContent(tabId, { type: "RESOLVE_ACTION_TARGET", action });
+  if (!resolved?.ok) {
+    return { ok: false, fallback: true, error: resolved?.error || "Could not resolve action target." };
+  }
+
+  const x = resolved.x;
+  const y = resolved.y;
+  const button = action.type === "rightClick" ? "right" : "left";
+  const clickCount = action.type === "doubleClick" ? 2 : 1;
+
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x,
+    y,
+    button: "none",
+    buttons: 0,
+    clickCount: 0,
+  });
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x,
+    y,
+    button,
+    buttons: button === "right" ? 2 : 1,
+    clickCount,
+  });
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x,
+    y,
+    button,
+    buttons: 0,
+    clickCount,
+  });
+
+  return { ok: true, message: `debug ${action.type} at (${Math.round(x)},${Math.round(y)})` };
+}
+
+async function performDebugScroll(tabId, action) {
+  const amount = Number(action.amount) || 400;
+  const direction = action.direction === "up" ? -1 : 1;
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseWheel",
+    x: 30,
+    y: 30,
+    deltaX: 0,
+    deltaY: direction * amount,
+  });
+  return { ok: true, message: `debug scrolled ${action.direction || "down"} ${amount}px` };
+}
+
+async function performDebugKeypress(tabId, action) {
+  if (!action.key) {
+    return { ok: false, fallback: false, error: "Keypress action requires key." };
+  }
+
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: action.key,
+    text: action.key.length === 1 ? action.key : undefined,
+  });
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: action.key,
+  });
+  return { ok: true, message: `debug keypress ${action.key}` };
+}
+
+async function performDebugType(tabId, action) {
+  if (!action.selector || typeof action.text !== "string") {
+    return { ok: false, fallback: false, error: "Type action requires selector and text." };
+  }
+
+  const focusResult = await sendToContent(tabId, { type: "FOCUS_SELECTOR", selector: action.selector });
+  if (!focusResult?.ok) {
+    return { ok: false, fallback: true, error: focusResult?.error || "Could not focus input target." };
+  }
+
+  await chrome.debugger.sendCommand({ tabId }, "Input.insertText", { text: action.text });
+  return { ok: true, message: `debug typed into ${focusResult.target || action.selector}` };
+}
+
+async function performDebugDrag(tabId, action) {
+  const { x, y, dx, dy } = action;
+  if ([x, y, dx, dy].some((n) => typeof n !== "number")) {
+    return { ok: false, fallback: false, error: "Drag requires numeric x,y,dx,dy." };
+  }
+
+  const endX = x + dx;
+  const endY = y + dy;
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x,
+    y,
+    button: "left",
+    buttons: 1,
+    clickCount: 1,
+  });
+
+  const steps = 10;
+  for (let i = 1; i <= steps; i += 1) {
+    const ix = x + ((endX - x) * i) / steps;
+    const iy = y + ((endY - y) * i) / steps;
+    await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x: ix,
+      y: iy,
+      button: "left",
+      buttons: 1,
+      clickCount: 1,
+    });
+  }
+
+  await chrome.debugger.sendCommand({ tabId }, "Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: endX,
+    y: endY,
+    button: "left",
+    buttons: 0,
+    clickCount: 1,
+  });
+
+  return { ok: true, message: `debug dragged from (${x},${y}) to (${endX},${endY})` };
 }
 
 async function sendToContent(tabId, payload) {
@@ -328,14 +538,19 @@ function sanitizeText(text, maxLen) {
 
 async function setStatus(patch) {
   const { automationStatus = {} } = await chrome.storage.local.get("automationStatus");
+  const hasRunning = Object.prototype.hasOwnProperty.call(patch, "running");
+  const hasStep = Object.prototype.hasOwnProperty.call(patch, "step");
+  const hasTask = Object.prototype.hasOwnProperty.call(patch, "task");
+  const hasTabId = Object.prototype.hasOwnProperty.call(patch, "tabId");
+
   await chrome.storage.local.set({
     automationStatus: {
       ...automationStatus,
       ...patch,
-      running: runState.running,
-      step: runState.step,
-      task: runState.task,
-      tabId: runState.tabId,
+      running: hasRunning ? patch.running : runState.running,
+      step: hasStep ? patch.step : runState.step,
+      task: hasTask ? patch.task : runState.task,
+      tabId: hasTabId ? patch.tabId : runState.tabId,
     },
   });
 }

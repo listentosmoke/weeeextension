@@ -1,4 +1,4 @@
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (!message?.type) {
     return;
   }
@@ -16,6 +16,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         scrollY: window.scrollY,
       },
     });
+    return;
+  }
+
+  if (message.type === "RESOLVE_ACTION_TARGET") {
+    sendResponse(resolveActionTarget(message.action));
+    return;
+  }
+
+  if (message.type === "FOCUS_SELECTOR") {
+    sendResponse(focusSelector(message.selector));
     return;
   }
 
@@ -59,6 +69,49 @@ function isVisible(element) {
   return rect.width > 0 && rect.height > 0;
 }
 
+function resolveActionTarget(action) {
+  const target = findTarget(action);
+  if (!target) {
+    return { ok: false, error: `Target not found. selector=${action?.selector || ""}` };
+  }
+
+  target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  const rect = target.getBoundingClientRect();
+  const x = typeof action?.x === "number" ? action.x : rect.left + rect.width / 2;
+  const y = typeof action?.y === "number" ? action.y : rect.top + rect.height / 2;
+
+  return {
+    ok: true,
+    x,
+    y,
+    target: describeElement(target),
+  };
+}
+
+function focusSelector(selector) {
+  if (!selector) {
+    return { ok: false, error: "Selector is required." };
+  }
+
+  const target = document.querySelector(selector);
+  if (!target) {
+    return { ok: false, error: `Type target not found: ${selector}` };
+  }
+
+  target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  target.focus();
+
+  if (typeof target.select === "function") {
+    try {
+      target.select();
+    } catch {
+      // ignore selection errors
+    }
+  }
+
+  return { ok: true, target: describeElement(target) };
+}
+
 async function executeAction(action) {
   if (!action?.type) {
     return { ok: false, error: "Action type missing." };
@@ -87,14 +140,14 @@ async function executeAction(action) {
 }
 
 function findTarget(action) {
-  if (action.selector) {
+  if (action?.selector) {
     const el = document.querySelector(action.selector);
     if (el) {
       return el;
     }
   }
 
-  if (typeof action.x === "number" && typeof action.y === "number") {
+  if (typeof action?.x === "number" && typeof action?.y === "number") {
     return document.elementFromPoint(action.x, action.y);
   }
 
@@ -102,32 +155,28 @@ function findTarget(action) {
 }
 
 function performPointerAction(action, eventType) {
-  const target = findTarget(action);
-  if (!target) {
-    return { ok: false, error: `Target not found. selector=${action.selector || ""}` };
+  const resolved = resolveActionTarget(action);
+  if (!resolved.ok) {
+    return resolved;
   }
 
-  target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-  const rect = target.getBoundingClientRect();
-  const x = typeof action.x === "number" ? action.x : rect.left + rect.width / 2;
-  const y = typeof action.y === "number" ? action.y : rect.top + rect.height / 2;
+  const target = findTarget(action) || document.elementFromPoint(resolved.x, resolved.y);
+  if (!target) {
+    return { ok: false, error: "Target disappeared before pointer action." };
+  }
 
   ["pointerdown", "mousedown", "mouseup", eventType].forEach((type) => {
     const event = new MouseEvent(type, {
       bubbles: true,
       cancelable: true,
       composed: true,
-      clientX: x,
-      clientY: y,
+      clientX: resolved.x,
+      clientY: resolved.y,
       button: eventType === "contextmenu" ? 2 : 0,
       buttons: eventType === "contextmenu" ? 2 : 1,
     });
     target.dispatchEvent(event);
   });
-
-  if (eventType === "click" && typeof target.click === "function") {
-    target.click();
-  }
 
   return {
     ok: true,
@@ -140,14 +189,12 @@ function performType(action) {
     return { ok: false, error: "Type action requires selector and text." };
   }
 
-  const target = document.querySelector(action.selector);
-  if (!target) {
-    return { ok: false, error: `Type target not found: ${action.selector}` };
+  const focusResult = focusSelector(action.selector);
+  if (!focusResult.ok) {
+    return focusResult;
   }
 
-  target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
-  target.focus();
-
+  const target = document.querySelector(action.selector);
   const prototype = Object.getPrototypeOf(target);
   const descriptor = Object.getOwnPropertyDescriptor(prototype, "value");
   if (descriptor?.set) {
@@ -181,7 +228,7 @@ function performKeypress(action) {
 function performScroll(action) {
   const amount = Number(action.amount) || 400;
   const direction = action.direction === "up" ? -1 : 1;
-  window.scrollBy({ top: direction * amount, left: 0, behavior: "instant" });
+  window.scrollBy({ top: direction * amount, left: 0, behavior: "auto" });
   return { ok: true, message: `Scrolled ${action.direction || "down"} ${amount}px` };
 }
 
