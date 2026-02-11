@@ -7,6 +7,7 @@ A complete Manifest V3 Chrome extension that can run **iterative, click-focused 
 - Captures the visible tab screenshot (`chrome.tabs.captureVisibleTab`)
 - Extracts visible page text from the DOM in a content script
 - Sends screenshot + page text + task to Gemini Vision with model fallback (`gemini-2.0-flash` → `gemini-2.0-flash-lite` → `gemini-1.5-flash`)
+- Sends screenshot + page text + task to Gemini Vision (`gemini-1.5-flash`)
 - Enforces structured JSON action plans from the model
 - Executes action plans in-page (click, double-click, right-click, type, keypress, scroll, drag, wait)
 - Repeats for many steps (up to 500 in UI, default 120)

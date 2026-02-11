@@ -3,6 +3,7 @@ const MODEL_CANDIDATES = [
   "gemini-2.0-flash-lite",
   "gemini-1.5-flash",
 ];
+const MODEL_NAME = "gemini-1.5-flash";
 const DEFAULT_MAX_STEPS = 120;
 const MAX_ACTIONS_PER_STEP = 8;
 const LOG_LIMIT = 1000;
@@ -168,6 +169,7 @@ async function collectPageState(tabId) {
 }
 
 async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const schema = {
     type: "object",
     properties: {
@@ -239,6 +241,18 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
   };
 
   const data = await requestWithModelFallback(apiKey, body);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Gemini request failed (${response.status}): ${text.slice(0, 300)}`);
+  }
+
+  const data = await response.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     throw new Error("Gemini response missing text JSON payload.");
