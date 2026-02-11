@@ -1,3 +1,8 @@
+const MODEL_CANDIDATES = [
+  "gemini-2.0-flash",
+  "gemini-2.0-flash-lite",
+  "gemini-1.5-flash",
+];
 const MODEL_NAME = "gemini-1.5-flash";
 const DEFAULT_MAX_STEPS = 120;
 const MAX_ACTIONS_PER_STEP = 8;
@@ -235,6 +240,7 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
     },
   };
 
+  const data = await requestWithModelFallback(apiKey, body);
   const response = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -264,6 +270,37 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
     reason: parsed.reason || "",
     actions: Array.isArray(parsed.actions) ? parsed.actions : [],
   };
+}
+
+async function requestWithModelFallback(apiKey, body) {
+  let lastError = null;
+
+  for (const model of MODEL_CANDIDATES) {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+    if (response.ok) {
+      await setStatus({ model });
+      return response.json();
+    }
+
+    const rawError = await response.text();
+    if (response.status === 404 || rawError.includes("is not found for API version")) {
+      log("warn", `Model ${model} unavailable for generateContent; trying next model.`);
+      lastError = `Model ${model} not available: ${rawError.slice(0, 240)}`;
+      continue;
+    }
+
+    throw new Error(`Gemini request failed on ${model} (${response.status}): ${rawError.slice(0, 300)}`);
+  }
+
+  throw new Error(
+    `Gemini request failed for all fallback models (${MODEL_CANDIDATES.join(", ")}). Last error: ${lastError || "none"}`
+  );
 }
 
 async function executeAction(tabId, action) {
