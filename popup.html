@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gemini Visual Agent</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main>
+      <h1>Gemini Visual Agent</h1>
+      <label>
+        Gemini API Key
+        <input id="apiKey" type="password" placeholder="AIza..." autocomplete="off" />
+      </label>
+      <label>
+        Task prompt
+        <textarea id="task" rows="4" placeholder="Example: Book the cheapest direct flight for next Friday."></textarea>
+      </label>
+      <label>
+        Max steps (1-500)
+        <input id="maxSteps" type="number" min="1" max="500" value="120" />
+      </label>
+      <div class="buttons">
+        <button id="start">Start</button>
+        <button id="stop" class="danger">Stop</button>
+      </div>
+
+      <section>
+        <h2>Status</h2>
+        <pre id="status">Idle</pre>
+      </section>
+
+      <section>
+        <h2>Logs</h2>
+        <div id="logs" aria-live="polite"></div>
+      </section>
+    </main>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>
