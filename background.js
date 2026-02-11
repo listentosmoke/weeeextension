@@ -3,6 +3,7 @@ const MODEL_CANDIDATES = [
   "gemini-2.0-flash-lite",
   "gemini-1.5-flash",
 ];
+const MODEL_NAME = "gemini-1.5-flash";
 const DEFAULT_MAX_STEPS = 120;
 const MAX_ACTIONS_PER_STEP = 8;
 const LOG_LIMIT = 1000;
@@ -16,7 +17,7 @@ const runState = {
   task: "",
 };
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || !message.type) {
     return;
   }
@@ -30,7 +31,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message.type === "STOP_AUTOMATION") {
     runState.stopRequested = true;
-    void log("warn", "Stop requested by user.");
+    log("warn", "Stop requested by user.");
     sendResponse({ ok: true });
   }
 });
@@ -71,7 +72,7 @@ async function startAutomation(payload) {
     automationLogs: [],
   });
 
-  await log("info", `Starting task: ${runState.task}`);
+  log("info", `Starting task: ${runState.task}`);
 
   const boundedSteps = Math.max(1, Math.min(Number(maxSteps) || DEFAULT_MAX_STEPS, 500));
   let done = false;
@@ -79,13 +80,13 @@ async function startAutomation(payload) {
   try {
     for (let step = 1; step <= boundedSteps; step += 1) {
       if (runState.stopRequested) {
-        await log("warn", `Stopped at step ${step} by user request.`);
+        log("warn", `Stopped at step ${step} by user request.`);
         break;
       }
 
       runState.step = step;
       await setStatus({ step });
-      await log("info", `Step ${step}: collecting page state.`);
+      log("info", `Step ${step}: collecting page state.`);
 
       const pageState = await collectPageState(runState.tabId);
       const modelOutput = await requestNextActions({
@@ -98,30 +99,30 @@ async function startAutomation(payload) {
 
       if (modelOutput.done) {
         done = true;
-        await log("success", `Model marked task done: ${modelOutput.reason || "No reason provided."}`);
+        log("success", `Model marked task done: ${modelOutput.reason || "No reason provided."}`);
         break;
       }
 
       if (!Array.isArray(modelOutput.actions) || modelOutput.actions.length === 0) {
-        await log("warn", "Model returned no actions; stopping.");
+        log("warn", "Model returned no actions; stopping.");
         break;
       }
 
       const actions = modelOutput.actions.slice(0, MAX_ACTIONS_PER_STEP);
-      await log("info", `Executing ${actions.length} action(s).`);
+      log("info", `Executing ${actions.length} action(s).`);
 
       for (const [index, action] of actions.entries()) {
         if (runState.stopRequested) {
-          await log("warn", "Stop requested before executing remaining actions.");
+          log("warn", "Stop requested before executing remaining actions.");
           break;
         }
 
         const result = await executeAction(runState.tabId, action);
         const label = `${step}.${index + 1} ${action.type}`;
         if (result.ok) {
-          await log("success", `${label}: ${result.message}`);
+          log("success", `${label}: ${result.message}`);
         } else {
-          await log("error", `${label}: ${result.error}`);
+          log("error", `${label}: ${result.error}`);
         }
 
         if (action.type === "wait" && typeof action.ms === "number") {
@@ -137,24 +138,11 @@ async function startAutomation(payload) {
       elapsedMs,
       done,
       stopRequested: runState.stopRequested,
-      error: null,
     });
 
     if (!runState.stopRequested) {
-      await log("info", `Run complete in ${(elapsedMs / 1000).toFixed(1)}s.`);
+      log("info", `Run complete in ${(elapsedMs / 1000).toFixed(1)}s.`);
     }
-  } catch (error) {
-    const elapsedMs = Date.now() - runState.startedAt;
-    await setStatus({
-      running: false,
-      finishedAt: Date.now(),
-      elapsedMs,
-      done: false,
-      stopRequested: runState.stopRequested,
-      error: error.message,
-    });
-    await log("error", `Automation failed: ${error.message}`);
-    throw error;
   } finally {
     runState.running = false;
     runState.stopRequested = false;
@@ -181,6 +169,7 @@ async function collectPageState(tabId) {
 }
 
 async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_NAME}:generateContent?key=${encodeURIComponent(apiKey)}`;
   const schema = {
     type: "object",
     properties: {
@@ -252,6 +241,18 @@ async function requestNextActions({ apiKey, task, step, maxSteps, pageState }) {
   };
 
   const data = await requestWithModelFallback(apiKey, body);
+  const response = await fetch(endpoint, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Gemini request failed (${response.status}): ${text.slice(0, 300)}`);
+  }
+
+  const data = await response.json();
   const text = data?.candidates?.[0]?.content?.parts?.[0]?.text;
   if (!text) {
     throw new Error("Gemini response missing text JSON payload.");
@@ -275,13 +276,10 @@ async function requestWithModelFallback(apiKey, body) {
   let lastError = null;
 
   for (const model of MODEL_CANDIDATES) {
-    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     });
 
@@ -292,7 +290,7 @@ async function requestWithModelFallback(apiKey, body) {
 
     const rawError = await response.text();
     if (response.status === 404 || rawError.includes("is not found for API version")) {
-      await log("warn", `Model ${model} unavailable for generateContent; trying next model.`);
+      log("warn", `Model ${model} unavailable for generateContent; trying next model.`);
       lastError = `Model ${model} not available: ${rawError.slice(0, 240)}`;
       continue;
     }
@@ -330,19 +328,14 @@ function sanitizeText(text, maxLen) {
 
 async function setStatus(patch) {
   const { automationStatus = {} } = await chrome.storage.local.get("automationStatus");
-  const hasRunning = Object.prototype.hasOwnProperty.call(patch, "running");
-  const hasStep = Object.prototype.hasOwnProperty.call(patch, "step");
-  const hasTask = Object.prototype.hasOwnProperty.call(patch, "task");
-  const hasTabId = Object.prototype.hasOwnProperty.call(patch, "tabId");
-
   await chrome.storage.local.set({
     automationStatus: {
       ...automationStatus,
       ...patch,
-      running: hasRunning ? patch.running : runState.running,
-      step: hasStep ? patch.step : runState.step,
-      task: hasTask ? patch.task : runState.task,
-      tabId: hasTabId ? patch.tabId : runState.tabId,
+      running: runState.running,
+      step: runState.step,
+      task: runState.task,
+      tabId: runState.tabId,
     },
   });
 }

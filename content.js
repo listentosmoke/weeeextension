@@ -1,4 +1,4 @@
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message?.type) {
     return;
   }
@@ -107,7 +107,7 @@ function performPointerAction(action, eventType) {
     return { ok: false, error: `Target not found. selector=${action.selector || ""}` };
   }
 
-  target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   const rect = target.getBoundingClientRect();
   const x = typeof action.x === "number" ? action.x : rect.left + rect.width / 2;
   const y = typeof action.y === "number" ? action.y : rect.top + rect.height / 2;
@@ -125,6 +125,10 @@ function performPointerAction(action, eventType) {
     target.dispatchEvent(event);
   });
 
+  if (eventType === "click" && typeof target.click === "function") {
+    target.click();
+  }
+
   return {
     ok: true,
     message: `${eventType} on ${describeElement(target)}`,
@@ -141,7 +145,7 @@ function performType(action) {
     return { ok: false, error: `Type target not found: ${action.selector}` };
   }
 
-  target.scrollIntoView({ block: "center", inline: "center", behavior: "auto" });
+  target.scrollIntoView({ block: "center", inline: "center", behavior: "instant" });
   target.focus();
 
   const prototype = Object.getPrototypeOf(target);
@@ -177,7 +181,7 @@ function performKeypress(action) {
 function performScroll(action) {
   const amount = Number(action.amount) || 400;
   const direction = action.direction === "up" ? -1 : 1;
-  window.scrollBy({ top: direction * amount, left: 0, behavior: "auto" });
+  window.scrollBy({ top: direction * amount, left: 0, behavior: "instant" });
   return { ok: true, message: `Scrolled ${action.direction || "down"} ${amount}px` };
 }
 
